@@ -1,42 +1,101 @@
-![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/fpga/badge.svg)
+# 7-bit Serial ALU with Shared Datapath and Fixed-Point Saturation
 
-# Tiny Tapeout Verilog Project Template
+This project implements a compact **7-bit serial ALU** in Verilog, designed with a **shared 1-bit internal datapath** to reduce hardware cost and fit within Tiny Tapeout area constraints.
 
-- [Read the documentation for project](docs/info.md)
+## Main idea
 
-## What is Tiny Tapeout?
+Instead of using a conventional parallel ALU, this design stores two 7-bit operands and then executes the selected operation internally **one bit per cycle**. This allows arithmetic, logic, saturation and comparison features to be supported with a compact hardware architecture.
 
-Tiny Tapeout is an educational project that aims to make it easier and cheaper than ever to get your digital and analog designs manufactured on a real chip.
+## Main features
 
-To learn more and get started, visit https://tinytapeout.com.
+- 7-bit serial operand loading
+- LSB-first input protocol
+- shared 1-bit execution datapath
+- signed fixed-point arithmetic with 3 fractional bits
+- saturating addition and subtraction
+- signed comparison with coded output
+- operand reuse without reloading data
+- compact architecture suitable for Tiny Tapeout-style area limits
 
-## Set up your Verilog project
+## Supported operations
 
-1. Add your Verilog files to the `src` folder.
-2. Edit the [info.yaml](info.yaml) and update information about your project, paying special attention to the `source_files` and `top_module` properties. If you are upgrading an existing Tiny Tapeout project, check out our [online info.yaml migration tool](https://tinytapeout.github.io/tt-yaml-upgrade-tool/).
-3. Edit [docs/info.md](docs/info.md) and add a description of your project.
-4. Adapt the testbench to your design. See [test/README.md](test/README.md) for more information.
+- `000` = `SUM`
+- `001` = `AND`
+- `010` = `OR`
+- `011` = `XOR`
+- `100` = `SUB`
+- `101` = `SAT_ADD`
+- `110` = `SAT_SUB`
+- `111` = `CMP_S`
 
-The GitHub action will automatically build the ASIC files using [LibreLane](https://www.zerotoasiccourse.com/terminology/librelane/).
+## Numeric format
 
-## Enable GitHub actions to build the results page
+Arithmetic operations are interpreted as **signed fixed-point 7-bit values with 3 fractional bits**.
 
-- [Enabling GitHub Pages](https://tinytapeout.com/faq/#my-github-action-is-failing-on-the-pages-part)
+This means:
 
-## Resources
+- range: **-8.000 to 7.875**
+- resolution: **0.125 per step**
 
-- [FAQ](https://tinytapeout.com/faq/)
-- [Digital design lessons](https://tinytapeout.com/digital_design/)
-- [Learn how semiconductors work](https://tinytapeout.com/siliwiz/)
-- [Join the community](https://tinytapeout.com/discord)
-- [Build your design locally](https://www.tinytapeout.com/guides/local-hardening/)
+Examples:
 
-## What next?
+- `0001000` = `1.000`
+- `0000001` = `0.125`
+- `0010100` = `2.500`
+- `1111000` = `-1.000`
 
-- [Submit your design to the next shuttle](https://app.tinytapeout.com/).
-- Edit [this README](README.md) and explain your design, how it works, and how to test it.
-- Share your project on your social network of choice:
-  - LinkedIn [#tinytapeout](https://www.linkedin.com/search/results/content/?keywords=%23tinytapeout) [@TinyTapeout](https://www.linkedin.com/company/100708654/)
-  - Mastodon [#tinytapeout](https://chaos.social/tags/tinytapeout) [@matthewvenn](https://chaos.social/@matthewvenn)
-  - X (formerly Twitter) [#tinytapeout](https://twitter.com/hashtag/tinytapeout) [@tinytapeout](https://twitter.com/tinytapeout)
-  - Bluesky [@tinytapeout.com](https://bsky.app/profile/tinytapeout.com)
+Bitwise operations (`AND`, `OR`, `XOR`) operate directly on the raw 7-bit words.
+
+## Comparison output
+
+The signed comparison operation does **not** return a numeric fixed-point value.  
+Instead, it returns a coded result:
+
+- `0000001` → `A < B`
+- `0000010` → `A = B`
+- `0000100` → `A > B`
+
+## IO summary
+
+### Inputs
+- `Bit_in` = serial input bit
+- `op[2:0]` = operation selector
+- `CLK` = clock
+- `RST_N` = active-low reset
+
+### Outputs
+- `Data_out[6:0]` = parallel result
+- `Done` = operation complete flag
+
+## How to use
+
+1. Apply reset with `RST_N = 0`
+2. Release reset with `RST_N = 1`
+3. Select the desired operation on `op`
+4. Send operand **A** serially, **7 bits LSB-first**
+5. Send operand **B** serially, **7 bits LSB-first**
+6. Wait until `Done = 1`
+7. Read the result from `Data_out`
+
+## Important usage notes
+
+- The design only accepts a valid result when `Done = 1`
+- Input order must always be: **A first, then B**
+- Both operands must be transmitted **LSB-first**
+- To evaluate another operation with the **same operands**, change `op` after `Done = 1`
+- To load a **new operand pair**, apply reset and repeat the loading sequence
+
+## Validation status
+
+The design has been validated with a self-checking Verilog testbench including:
+
+- directed demo cases
+- exhaustive arithmetic and logic sweeps
+- saturating arithmetic checks
+- protocol checks for reset and operand reload behavior
+
+## More details
+
+See:
+
+- `docs/info.md`

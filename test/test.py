@@ -1,40 +1,159 @@
-# SPDX-FileCopyrightText: © 2024 Tiny Tapeout
-# SPDX-License-Identifier: Apache-2.0
-
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotb.triggers import RisingEdge, FallingEdge, ClockCycles
 
 
-@cocotb.test()
-async def test_project(dut):
-    dut._log.info("Start")
+OP_SUM     = 0b000
+OP_AND     = 0b001
+OP_OR      = 0b010
+OP_XOR     = 0b011
+OP_SUB     = 0b100
+OP_SAT_ADD = 0b101
+OP_SAT_SUB = 0b110
+OP_CMP_S   = 0b111
 
-    # Set the clock period to 10 us (100 KHz)
-    clock = Clock(dut.clk, 10, unit="us")
-    cocotb.start_soon(clock.start())
 
-    # Reset
-    dut._log.info("Reset")
-    dut.ena.value = 1
+def make_ui(bit_in: int, op: int) -> int:
+    return ((op & 0x7) << 1) | (bit_in & 0x1)
+
+
+def tc7_to_int(x: int) -> int:
+    x &= 0x7F
+    if x & 0x40:
+        return x - 128
+    return x
+
+
+def int_to_tc7(x: int) -> int:
+    return x & 0x7F
+
+
+def ref_model(a: int, b: int, op: int) -> int:
+    sa = tc7_to_int(a)
+    sb = tc7_to_int(b)
+
+    if op == OP_SUM:
+        return int_to_tc7(sa + sb)
+    elif op == OP_AND:
+        return (a & b) & 0x7F
+    elif op == OP_OR:
+        return (a | b) & 0x7F
+    elif op == OP_XOR:
+        return (a ^ b) & 0x7F
+    elif op == OP_SUB:
+        return int_to_tc7(sa - sb)
+    elif op == OP_SAT_ADD:
+        tmp = sa + sb
+        if tmp > 63:
+            tmp = 63
+        elif tmp < -64:
+            tmp = -64
+        return int_to_tc7(tmp)
+    elif op == OP_SAT_SUB:
+        tmp = sa - sb
+        if tmp > 63:
+            tmp = 63
+        elif tmp < -64:
+            tmp = -64
+        return int_to_tc7(tmp)
+    elif op == OP_CMP_S:
+        return a if sa <= sb else b
+    else:
+        return 0
+
+
+async def reset_dut(dut):
     dut.ui_in.value = 0
     dut.uio_in.value = 0
     dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 10)
+    await ClockCycles(dut.clk, 2)
     dut.rst_n.value = 1
-
-    dut._log.info("Test project behavior")
-
-    # Set the input values you want to test
-    dut.ui_in.value = 20
-    dut.uio_in.value = 30
-
-    # Wait for one clock cycle to see the output values
     await ClockCycles(dut.clk, 1)
 
-    # The following assersion is just an example of how to check the output values.
-    # Change it to match the actual expected output of your module:
-    assert dut.uo_out.value == 50
 
-    # Keep testing the module by changing the input values, waiting for
-    # one or more clock cycles, and asserting the expected output values.
+async def load_pair(dut, a_word: int, b_word: int, op: int):
+    for i in range(7):
+        await FallingEdge(dut.clk)
+        dut.ui_in.value = make_ui((a_word >> i) & 1, op)
+        await RisingEdge(dut.clk)
+        assert ((int(dut.uo_out.value) >> 7) & 1) == 0, "Done alto durante carga de A"
+
+    for i in range(7):
+        await FallingEdge(dut.clk)
+        dut.ui_in.value = make_ui((b_word >> i) & 1, op)
+        await RisingEdge(dut.clk)
+        assert ((int(dut.uo_out.value) >> 7) & 1) == 0, "Done alto durante carga de B"
+
+    await FallingEdge(dut.clk)
+    dut.ui_in.value = make_ui(0, op)
+
+
+async def wait_done(dut, timeout_cycles=40):
+    for _ in range(timeout_cycles):
+        await RisingEdge(dut.clk)
+        if ((int(dut.uo_out.value) >> 7) & 1) == 1:
+            return
+    raise AssertionError("Timeout esperando Done")
+
+
+async def run_fresh_transaction(dut, a_word: int, b_word: int, op: int):
+    expected = ref_model(a_word, b_word, op)
+    await reset_dut(dut)
+    await load_pair(dut, a_word, b_word, op)
+    await wait_done(dut)
+
+    got = int(dut.uo_out.value) & 0x7F
+    assert got == expected, (
+        f"Resultado incorrecto op={op:03b} A=0x{a_word:02X} B=0x{b_word:02X} "
+        f"esperado=0x{expected:02X} obtenido=0x{got:02X}"
+    )
+
+
+async def rerun_same_operands(dut, new_op: int):
+    # Cambia opcode para re-ejecutar con mismos operandos
+    await FallingEdge(dut.clk)
+    dut.ui_in.value = make_ui(0, new_op)
+
+    # Esperar a que Done baje
+    for _ in range(5):
+        await RisingEdge(dut.clk)
+        if ((int(dut.uo_out.value) >> 7) & 1) == 0:
+            break
+
+    # Esperar el nuevo Done
+    await wait_done(dut)
+
+
+@cocotb.test()
+async def test_serial_fixed_point_alu(dut):
+    cocotb.start_soon(Clock(dut.clk, 10, unit="us").start())
+
+    dut.ena.value = 1
+    dut.uio_in.value = 0
+
+    # 1) SUM: 5 + (-3) = 2
+    await run_fresh_transaction(dut, int_to_tc7(5), int_to_tc7(-3), OP_SUM)
+
+    # 2) SAT_ADD: 50 + 30 => saturado a 63
+    await run_fresh_transaction(dut, int_to_tc7(50), int_to_tc7(30), OP_SAT_ADD)
+
+    # 3) CMP_S: devuelve el menor signed
+    await run_fresh_transaction(dut, int_to_tc7(-12), int_to_tc7(5), OP_CMP_S)
+
+    # 4) Re-ejecución con mismos operandos sin reset, cambiando solo op
+    a_word = 0b0101010  # 42
+    b_word = 0b0011001  # 25
+
+    await reset_dut(dut)
+    await load_pair(dut, a_word, b_word, OP_XOR)
+    await wait_done(dut)
+
+    got1 = int(dut.uo_out.value) & 0x7F
+    exp1 = ref_model(a_word, b_word, OP_XOR)
+    assert got1 == exp1, f"XOR incorrecto: esperado=0x{exp1:02X}, obtenido=0x{got1:02X}"
+
+    await rerun_same_operands(dut, OP_AND)
+
+    got2 = int(dut.uo_out.value) & 0x7F
+    exp2 = ref_model(a_word, b_word, OP_AND)
+    assert got2 == exp2, f"AND re-ejecutado incorrecto: esperado=0x{exp2:02X}, obtenido=0x{got2:02X}"

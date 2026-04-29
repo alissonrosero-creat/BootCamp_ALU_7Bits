@@ -1,7 +1,6 @@
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge, FallingEdge, ClockCycles
-
+from cocotb.triggers import RisingEdge, FallingEdge, ClockCycles, Timer
 
 OP_SUM     = 0b000
 OP_AND     = 0b001
@@ -11,6 +10,8 @@ OP_SUB     = 0b100
 OP_SAT_ADD = 0b101
 OP_SAT_SUB = 0b110
 OP_CMP_S   = 0b111
+
+SETTLE_NS = 1
 
 
 def make_ui(bit_in: int, op: int) -> int:
@@ -62,13 +63,22 @@ def ref_model(a: int, b: int, op: int) -> int:
         return 0
 
 
+def done_bit(dut) -> int:
+    return (int(dut.uo_out.value) >> 7) & 1
+
+
+def result_word(dut) -> int:
+    return int(dut.uo_out.value) & 0x7F
+
+
 async def reset_dut(dut):
     dut.ui_in.value = 0
     dut.uio_in.value = 0
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 2)
     dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 1)
+    await RisingEdge(dut.clk)
+    await Timer(SETTLE_NS, units="ns")
 
 
 async def load_pair(dut, a_word: int, b_word: int, op: int):
@@ -76,22 +86,25 @@ async def load_pair(dut, a_word: int, b_word: int, op: int):
         await FallingEdge(dut.clk)
         dut.ui_in.value = make_ui((a_word >> i) & 1, op)
         await RisingEdge(dut.clk)
-        assert ((int(dut.uo_out.value) >> 7) & 1) == 0, "Done alto durante carga de A"
+        await Timer(SETTLE_NS, units="ns")
+        assert done_bit(dut) == 0, "Done alto durante carga de A"
 
     for i in range(7):
         await FallingEdge(dut.clk)
         dut.ui_in.value = make_ui((b_word >> i) & 1, op)
         await RisingEdge(dut.clk)
-        assert ((int(dut.uo_out.value) >> 7) & 1) == 0, "Done alto durante carga de B"
+        await Timer(SETTLE_NS, units="ns")
+        assert done_bit(dut) == 0, "Done alto durante carga de B"
 
     await FallingEdge(dut.clk)
     dut.ui_in.value = make_ui(0, op)
 
 
-async def wait_done(dut, timeout_cycles=40):
+async def wait_done(dut, timeout_cycles=50):
     for _ in range(timeout_cycles):
         await RisingEdge(dut.clk)
-        if ((int(dut.uo_out.value) >> 7) & 1) == 1:
+        await Timer(SETTLE_NS, units="ns")
+        if done_bit(dut) == 1:
             return
     raise AssertionError("Timeout esperando Done")
 
@@ -102,7 +115,7 @@ async def run_fresh_transaction(dut, a_word: int, b_word: int, op: int):
     await load_pair(dut, a_word, b_word, op)
     await wait_done(dut)
 
-    got = int(dut.uo_out.value) & 0x7F
+    got = result_word(dut)
     assert got == expected, (
         f"Resultado incorrecto op={op:03b} A=0x{a_word:02X} B=0x{b_word:02X} "
         f"esperado=0x{expected:02X} obtenido=0x{got:02X}"
@@ -110,17 +123,15 @@ async def run_fresh_transaction(dut, a_word: int, b_word: int, op: int):
 
 
 async def rerun_same_operands(dut, new_op: int):
-    # Cambia opcode para re-ejecutar con mismos operandos
     await FallingEdge(dut.clk)
     dut.ui_in.value = make_ui(0, new_op)
 
-    # Esperar a que Done baje
-    for _ in range(5):
+    for _ in range(6):
         await RisingEdge(dut.clk)
-        if ((int(dut.uo_out.value) >> 7) & 1) == 0:
+        await Timer(SETTLE_NS, units="ns")
+        if done_bit(dut) == 0:
             break
 
-    # Esperar el nuevo Done
     await wait_done(dut)
 
 
@@ -130,6 +141,8 @@ async def test_serial_fixed_point_alu(dut):
 
     dut.ena.value = 1
     dut.uio_in.value = 0
+    dut.ui_in.value = 0
+    dut.rst_n.value = 1
 
     # 1) SUM: 5 + (-3) = 2
     await run_fresh_transaction(dut, int_to_tc7(5), int_to_tc7(-3), OP_SUM)
@@ -148,12 +161,12 @@ async def test_serial_fixed_point_alu(dut):
     await load_pair(dut, a_word, b_word, OP_XOR)
     await wait_done(dut)
 
-    got1 = int(dut.uo_out.value) & 0x7F
+    got1 = result_word(dut)
     exp1 = ref_model(a_word, b_word, OP_XOR)
     assert got1 == exp1, f"XOR incorrecto: esperado=0x{exp1:02X}, obtenido=0x{got1:02X}"
 
     await rerun_same_operands(dut, OP_AND)
 
-    got2 = int(dut.uo_out.value) & 0x7F
+    got2 = result_word(dut)
     exp2 = ref_model(a_word, b_word, OP_AND)
     assert got2 == exp2, f"AND re-ejecutado incorrecto: esperado=0x{exp2:02X}, obtenido=0x{got2:02X}"

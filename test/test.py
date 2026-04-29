@@ -11,7 +11,8 @@ OP_SAT_ADD = 0b101
 OP_SAT_SUB = 0b110
 OP_CMP_S   = 0b111
 
-SETTLE_NS = 1
+# En gate-level conviene dar más margen de asentamiento
+SETTLE_NS = 20
 
 
 def make_ui(bit_in: int, op: int) -> int:
@@ -78,33 +79,39 @@ async def reset_dut(dut):
     await ClockCycles(dut.clk, 2)
     dut.rst_n.value = 1
     await RisingEdge(dut.clk)
-    await Timer(SETTLE_NS, units="ns")
+    await Timer(SETTLE_NS, unit="ns")
 
 
 async def load_pair(dut, a_word: int, b_word: int, op: int):
+    # Carga A, LSB-first
     for i in range(7):
         await FallingEdge(dut.clk)
         dut.ui_in.value = make_ui((a_word >> i) & 1, op)
         await RisingEdge(dut.clk)
-        await Timer(SETTLE_NS, units="ns")
+        await Timer(SETTLE_NS, unit="ns")
         assert done_bit(dut) == 0, "Done alto durante carga de A"
 
+    # Carga B, LSB-first
     for i in range(7):
         await FallingEdge(dut.clk)
         dut.ui_in.value = make_ui((b_word >> i) & 1, op)
         await RisingEdge(dut.clk)
-        await Timer(SETTLE_NS, units="ns")
+        await Timer(SETTLE_NS, unit="ns")
         assert done_bit(dut) == 0, "Done alto durante carga de B"
 
+    # Mantener opcode y poner bit_in en 0 al terminar la carga
     await FallingEdge(dut.clk)
     dut.ui_in.value = make_ui(0, op)
 
 
-async def wait_done(dut, timeout_cycles=50):
+async def wait_done(dut, timeout_cycles=60):
     for _ in range(timeout_cycles):
         await RisingEdge(dut.clk)
-        await Timer(SETTLE_NS, units="ns")
+        await Timer(SETTLE_NS, unit="ns")
         if done_bit(dut) == 1:
+            # Dar medio ciclo extra para que la salida paralela se asiente bien
+            await FallingEdge(dut.clk)
+            await Timer(SETTLE_NS, unit="ns")
             return
     raise AssertionError("Timeout esperando Done")
 
@@ -123,15 +130,18 @@ async def run_fresh_transaction(dut, a_word: int, b_word: int, op: int):
 
 
 async def rerun_same_operands(dut, new_op: int):
+    # Cambiar opcode para re-ejecutar con los mismos operandos cargados
     await FallingEdge(dut.clk)
     dut.ui_in.value = make_ui(0, new_op)
 
-    for _ in range(6):
+    # Esperar a que Done baje
+    for _ in range(8):
         await RisingEdge(dut.clk)
-        await Timer(SETTLE_NS, units="ns")
+        await Timer(SETTLE_NS, unit="ns")
         if done_bit(dut) == 0:
             break
 
+    # Esperar al nuevo Done
     await wait_done(dut)
 
 

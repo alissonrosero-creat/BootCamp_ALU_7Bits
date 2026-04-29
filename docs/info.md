@@ -1,20 +1,61 @@
-<!---
+# Serial Fixed-Point ALU with Shared Datapath
 
-This file is used to generate your project datasheet. Please fill in the information below and delete any unused
-sections.
+## Overview
 
-You can also include images in this folder and reference them in the markdown. Each image must be less than
-512 kb in size, and the combined size of all images must be less than 1 MB.
--->
+This project implements a compact 7-bit serial fixed-point ALU for Tiny Tapeout.
 
-## How it works
+The design receives operands serially, least-significant bit first, using a single input bit stream.  
+Operand `A` is loaded first, operand `B` is loaded second, and then the selected operation is executed with a shared bit-serial datapath.
 
-Explain how your project works
+The output is provided in parallel.
 
-## How to test
+## Main features
 
-Explain how to use your project
+- 7-bit datapath
+- serial operand loading
+- shared datapath architecture
+- fixed-point operation style
+- arithmetic, logic, saturation, and signed compare behavior
 
-## External hardware
+## Supported operations
 
-List external hardware used in your project (e.g. PMOD, LED display, etc), if any
+- `000` = SUM
+- `001` = AND
+- `010` = OR
+- `011` = XOR
+- `100` = SUB
+- `101` = SAT_ADD
+- `110` = SAT_SUB
+- `111` = CMP_S
+
+## Important behavior
+
+### Operand load protocol
+- first 7 serial bits load operand `A`
+- next 7 serial bits load operand `B`
+- loading is LSB-first
+
+### Execution completion
+The `Done` output goes high when the operation has completed.
+
+### Re-execution rule
+After completion, the design remains in `DONE`.
+It only starts a new execution with the same stored operands if the opcode changes.
+
+To load a completely new operand pair, reset is used.
+
+### Signed compare behavior
+`CMP_S` returns the smaller signed operand, not a one-bit comparison flag.
+
+## Tiny Tapeout mapping
+
+### Inputs
+- `ui[0]` = serial input bit
+- `ui[3:1]` = operation select
+
+### Outputs
+- `uo[6:0]` = ALU result
+- `uo[7]` = Done
+
+### Bidirectional IO
+Unused.

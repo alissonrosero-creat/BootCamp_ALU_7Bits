@@ -1,6 +1,6 @@
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge, FallingEdge, ClockCycles, Timer
+from cocotb.triggers import RisingEdge, FallingEdge, Timer
 
 OP_SUM     = 0b000
 OP_AND     = 0b001
@@ -11,8 +11,8 @@ OP_SAT_ADD = 0b101
 OP_SAT_SUB = 0b110
 OP_CMP_S   = 0b111
 
-# En gate-level conviene dar más margen de asentamiento
-SETTLE_NS = 20
+# Igual que el TB Verilog: espera corta tipo #1
+SETTLE_NS = 1
 
 
 def make_ui(bit_in: int, op: int) -> int:
@@ -72,55 +72,62 @@ def result_word(dut) -> int:
     return int(dut.uo_out.value) & 0x7F
 
 
-async def reset_dut(dut):
-    dut.ui_in.value = 0
+async def reset_new_transaction(dut, op: int):
+    # Igual que el TB Verilog:
+    # op ya fijo antes del reset
+    # reset bajo
+    # esperar 2 posedges
+    # #1
+    # subir reset
+    dut.ui_in.value = make_ui(0, op)
     dut.uio_in.value = 0
     dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 2)
-    dut.rst_n.value = 1
+
     await RisingEdge(dut.clk)
+    await RisingEdge(dut.clk)
+    await Timer(SETTLE_NS, unit="ns")
+
+    dut.rst_n.value = 1
     await Timer(SETTLE_NS, unit="ns")
 
 
 async def load_pair(dut, a_word: int, b_word: int, op: int):
-    # Carga A, LSB-first
+    # Carga A LSB-first
     for i in range(7):
         await FallingEdge(dut.clk)
         dut.ui_in.value = make_ui((a_word >> i) & 1, op)
+
         await RisingEdge(dut.clk)
         await Timer(SETTLE_NS, unit="ns")
-        assert done_bit(dut) == 0, "Done alto durante carga de A"
 
-    # Carga B, LSB-first
+        assert done_bit(dut) == 0, "Done alto durante LOAD_A"
+
+    # Carga B LSB-first
     for i in range(7):
         await FallingEdge(dut.clk)
         dut.ui_in.value = make_ui((b_word >> i) & 1, op)
+
         await RisingEdge(dut.clk)
         await Timer(SETTLE_NS, unit="ns")
-        assert done_bit(dut) == 0, "Done alto durante carga de B"
 
-    # Mantener opcode y poner bit_in en 0 al terminar la carga
+        assert done_bit(dut) == 0, "Done alto durante LOAD_B"
+
+    # Igual que el TB original: dejar Bit_in en 0 con el mismo opcode
     await FallingEdge(dut.clk)
     dut.ui_in.value = make_ui(0, op)
 
 
-async def wait_done(dut, timeout_cycles=60):
-    for _ in range(timeout_cycles):
+async def wait_done_and_check(dut, expected: int, op: int, a_word: int, b_word: int):
+    watchdog = 0
+
+    while done_bit(dut) != 1 and watchdog < 50:
         await RisingEdge(dut.clk)
         await Timer(SETTLE_NS, unit="ns")
-        if done_bit(dut) == 1:
-            # Dar medio ciclo extra para que la salida paralela se asiente bien
-            await FallingEdge(dut.clk)
-            await Timer(SETTLE_NS, unit="ns")
-            return
-    raise AssertionError("Timeout esperando Done")
+        watchdog += 1
 
-
-async def run_fresh_transaction(dut, a_word: int, b_word: int, op: int):
-    expected = ref_model(a_word, b_word, op)
-    await reset_dut(dut)
-    await load_pair(dut, a_word, b_word, op)
-    await wait_done(dut)
+    assert done_bit(dut) == 1, (
+        f"Timeout esperando Done. op={op:03b} A=0x{a_word:02X} B=0x{b_word:02X}"
+    )
 
     got = result_word(dut)
     assert got == expected, (
@@ -129,20 +136,34 @@ async def run_fresh_transaction(dut, a_word: int, b_word: int, op: int):
     )
 
 
-async def rerun_same_operands(dut, new_op: int):
-    # Cambiar opcode para re-ejecutar con los mismos operandos cargados
+async def run_fresh_transaction(dut, a_word: int, b_word: int, op: int):
+    expected = ref_model(a_word, b_word, op)
+
+    # Igual que el TB .v: op se fija ANTES del reset
+    dut.ui_in.value = make_ui(0, op)
+
+    await reset_new_transaction(dut, op)
+    await load_pair(dut, a_word, b_word, op)
+    await wait_done_and_check(dut, expected, op, a_word, b_word)
+
+
+async def rerun_same_operands(dut, a_word: int, b_word: int, new_op: int):
+    expected = ref_model(a_word, b_word, new_op)
+
     await FallingEdge(dut.clk)
     dut.ui_in.value = make_ui(0, new_op)
 
-    # Esperar a que Done baje
-    for _ in range(8):
+    watchdog = 0
+    while done_bit(dut) != 0 and watchdog < 5:
         await RisingEdge(dut.clk)
         await Timer(SETTLE_NS, unit="ns")
-        if done_bit(dut) == 0:
-            break
+        watchdog += 1
 
-    # Esperar al nuevo Done
-    await wait_done(dut)
+    assert done_bit(dut) == 0, (
+        f"No salió de DONE tras cambio de op. new_op={new_op:03b}"
+    )
+
+    await wait_done_and_check(dut, expected, new_op, a_word, b_word)
 
 
 @cocotb.test()
@@ -163,20 +184,9 @@ async def test_serial_fixed_point_alu(dut):
     # 3) CMP_S: devuelve el menor signed
     await run_fresh_transaction(dut, int_to_tc7(-12), int_to_tc7(5), OP_CMP_S)
 
-    # 4) Re-ejecución con mismos operandos sin reset, cambiando solo op
+    # 4) Re-ejecución con mismos operandos cambiando solo op
     a_word = 0b0101010  # 42
     b_word = 0b0011001  # 25
 
-    await reset_dut(dut)
-    await load_pair(dut, a_word, b_word, OP_XOR)
-    await wait_done(dut)
-
-    got1 = result_word(dut)
-    exp1 = ref_model(a_word, b_word, OP_XOR)
-    assert got1 == exp1, f"XOR incorrecto: esperado=0x{exp1:02X}, obtenido=0x{got1:02X}"
-
-    await rerun_same_operands(dut, OP_AND)
-
-    got2 = result_word(dut)
-    exp2 = ref_model(a_word, b_word, OP_AND)
-    assert got2 == exp2, f"AND re-ejecutado incorrecto: esperado=0x{exp2:02X}, obtenido=0x{got2:02X}"
+    await run_fresh_transaction(dut, a_word, b_word, OP_XOR)
+    await rerun_same_operands(dut, a_word, b_word, OP_AND)
